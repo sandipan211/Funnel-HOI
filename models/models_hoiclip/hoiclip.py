@@ -9,9 +9,14 @@ from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
 import numpy as np
 from ModifiedCLIP import clip
 
-# change SS for ACMMM 20204 rebuttal - experimenting with ALIP
 import ModifiedALIP.src.open_alip.my_alip_load as alip_load
 from ModifiedALIP.src.open_alip import tokenize as alip_tokenize
+
+import ModifiedSLIP.my_slip_load as slip_load
+from ModifiedSLIP.tokenizer import SimpleTokenizer as Slip_Tok
+
+import ModifiedMetaCLIP.src.mini_clip.my_metaclip_load as metaclip_load
+from ModifiedMetaCLIP.src.mini_clip.factory import get_tokenizer as metaclip_tokenize
 
 
 from datasets.hico_text_label import hico_text_label, hico_obj_text_label, hico_unseen_index
@@ -21,10 +26,6 @@ from datasets.static_hico import HOI_IDX_TO_ACT_IDX
 from ..backbone import build_backbone
 from ..matcher import build_matcher
 from .gen import build_gen
-
-# from myVisualization import myVisualizationAveragePooling,myVisualizationfo,myVisualizationSum,gradCAMAveragePooling,gradCAMfo,gradCAMSum
-# hwArray,adaptiveAverageActivations,sumActivations,foActivations=[],[],[],[]
-# adaptiveAverageGradients,sumGradients,foGradients=[],[],[]
 
 def _sigmoid(x):
     y = torch.clamp(x.sigmoid(), min=1e-4, max=1 - 1e-4)
@@ -53,9 +54,7 @@ class HOICLIP(nn.Module):
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.obj_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        # self.clip_model, self.preprocess = clip.load(self.args.clip_model)
-
-        # change SS for ACMMM 2024 rebuttal
+        self.unsqueeze_tok_output = False
         if args.vlm_model== 'clip':
             self.clip_model, self.preprocess = clip.load(self.args.clip_model)
             self.my_tokenizer = clip.tokenize
@@ -63,6 +62,16 @@ class HOICLIP(nn.Module):
             # print('Using ALIP as VLM model in HOICLIP')
             self.clip_model, self.preprocess = alip_load.load(self.args.clip_model, self.args.vlm_model_path)
             self.my_tokenizer = alip_tokenize
+        elif args.vlm_model == 'slip':
+            # print('Using SLIP as VLM model in HOICLIP')
+            self.clip_model, self.preprocess = slip_load.load(self.args.clip_model, self.args.vlm_model_path)
+            self.my_tokenizer = Slip_Tok()
+            self.unsqueeze_tok_output = True
+        elif args.vlm_model == 'metaclip':
+            # print('Using MetaCLIP as VLM model')
+            self.clip_model, _, self.preprocess = metaclip_load.load(model_name='ViT-B-32-worldwide@WorldWideCLIP', model_weight=self.args.vlm_model_path)
+            self.my_tokenizer = metaclip_tokenize()
+
 
         if self.args.dataset_file == 'hico':
             hoi_text_label = hico_text_label
@@ -110,7 +119,6 @@ class HOICLIP(nn.Module):
             self.verb_projection = nn.Linear(args.clip_embed_dim, 29, bias=False)
             self.verb_projection.weight.data = torch.load(args.verb_pth, map_location='cpu')
             self.verb_weight = args.verb_weight
-            # print(f'weight shape: {self.verb_projection.weight.shape}')
 
         if args.with_clip_label:
             if args.fix_clip_label:
@@ -154,11 +162,11 @@ class HOICLIP(nn.Module):
 
     def init_classifier_with_CLIP(self, hoi_text_label, obj_text_label, unseen_index, no_clip_cls_init=False):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        # take class names of all HOIs and get their semantics
-        # text_inputs = torch.cat([clip.tokenize(hoi_text_label[id]) for id in hoi_text_label.keys()])
 
-        # change SS for ACMMM 2024 rebuttal
-        text_inputs = torch.cat([self.my_tokenizer(hoi_text_label[id]) for id in hoi_text_label.keys()])
+        if self.unsqueeze_tok_output:
+            text_inputs = torch.cat([self.my_tokenizer(hoi_text_label[id]).unsqueeze(0) for id in hoi_text_label.keys()])
+        else:
+            text_inputs = torch.cat([self.my_tokenizer(hoi_text_label[id]) for id in hoi_text_label.keys()])
 
         # in text_inputs_del, get the semantics for seen HOIs
         if self.args.del_unseen and unseen_index is not None:
@@ -171,16 +179,18 @@ class HOICLIP(nn.Module):
                     hoi_text_label_del[k] = hoi_text_label[k]
         else:
             hoi_text_label_del = hoi_text_label.copy()
-        # text_inputs_del = torch.cat(
-        #     [clip.tokenize(hoi_text_label[id]) for id in hoi_text_label_del.keys()])
 
-        # obj_text_inputs = torch.cat([clip.tokenize(obj_text[1]) for obj_text in obj_text_label])
+        if self.unsqueeze_tok_output:
+            text_inputs_del = torch.cat(
+                [self.my_tokenizer(hoi_text_label[id]).unsqueeze(0) for id in hoi_text_label_del.keys()])
 
-        # change SS for ACMMM 2024 rebuttal
-        text_inputs_del = torch.cat(
-            [self.my_tokenizer(hoi_text_label[id]) for id in hoi_text_label_del.keys()])
+            obj_text_inputs = torch.cat([self.my_tokenizer(obj_text[1]).unsqueeze(0) for obj_text in obj_text_label])
+        else:
+            text_inputs_del = torch.cat(
+                [self.my_tokenizer(hoi_text_label[id]) for id in hoi_text_label_del.keys()])
 
-        obj_text_inputs = torch.cat([self.my_tokenizer(obj_text[1]) for obj_text in obj_text_label])
+            obj_text_inputs = torch.cat([self.my_tokenizer(obj_text[1]) for obj_text in obj_text_label])
+
 
         clip_model = self.clip_model
         clip_model.to(device)
@@ -188,10 +198,11 @@ class HOICLIP(nn.Module):
             text_embedding = clip_model.encode_text(text_inputs.to(device))
             text_embedding_del = clip_model.encode_text(text_inputs_del.to(device))
             obj_text_embedding = clip_model.encode_text(obj_text_inputs.to(device))
-            v_linear_proj_weight = clip_model.visual.proj.detach()
+            if self.args.vlm_model == 'slip':
+                v_linear_proj_weight = clip_model.image_projection.detach()
+            else:
+                v_linear_proj_weight = clip_model.visual.proj.detach()
 
-            # change SS
-            # print(f'v_linear_proj: {v_linear_proj_weight.shape}')
 
         if not no_clip_cls_init:
             print('\nuse clip text encoder to init classifier weight\n')
@@ -205,20 +216,9 @@ class HOICLIP(nn.Module):
 
     def forward(self, samples, is_training=True, clip_input=None, targets=None):
         if not isinstance(samples, NestedTensor) and not self.args.efficiency_report:
-            # change SS - flow of control doesn't reach here, so samples are already of NestedTensor type
-            samples = nested_tensor_from_tensor_list(samples)
-        
-        # print("from hoiclip.py")
-        # print(f"samples shape: {samples.shape}")
-        # print(f"targets shape: {len(targets)}")
-        # print(f"targets: {(targets)}")
-        # for target in targets:
-        #     print(f"name: {target['filename']}")
-        # print(f"targets[0]: {(targets[0])}")
-        # print(f"targets[1]: {(targets[1])}")
-        # print(f"clip_input shape: {clip_input.shape}")
 
-        # change SS for ACMMM 2024 rebuttal - for flop analysis
+            samples = nested_tensor_from_tensor_list(samples)
+
         if self.args.efficiency_report:
             src, pos = torch.randn((self.args.batch_size, 2048, 24, 29)), torch.randn((self.args.batch_size, 256, 24, 29))
             mask = torch.randn((self.args.batch_size, 24, 29))
@@ -228,43 +228,16 @@ class HOICLIP(nn.Module):
 
         else:
             features, pos = self.backbone(samples)
-            # print(f"features shape: {features[-1].size(0)}")
-            # print(f"clip visual proj shape: {self.clip_visual_proj.shape}")
+           
             src, mask = features[-1].decompose()
             assert mask is not None
             pos_final = pos[-1]
-        # h_hs, o_hs, inter_hs, clip_cls_feature, clip_hoi_score, clip_visual = self.transformer(self.input_proj(src), mask,
-        #                                         self.query_embed_h.weight,
-        #                                         self.query_embed_o.weight,
-        #                                         self.pos_guided_embedd.weight,
-        #                                         pos[-1], self.clip_model, self.clip_visual_proj, clip_input)
+        
         h_hs, o_hs, inter_hs, clip_cls_feature, clip_hoi_score, clip_visual = self.transformer(self.input_proj(src), mask,
                                                 self.query_embed_h.weight,
                                                 self.query_embed_o.weight,
                                                 self.pos_guided_embedd.weight,
                                                 pos_final, self.clip_model, self.clip_visual_proj, clip_input, targets)
-
-        # print(f"{adaptiveAverageActivations[0].shape} {adaptiveAverageGradients[0].shape}")
-        # print(f"{sumActivations[0].shape} {sumGradients[0].shape}")
-        # print(f"{foActivations[0].shape} {foGradients[0].shape}")
-        # myVisualizationAveragePooling(adaptiveAverageActivations[0],hwArray[0][0],hwArray[0][1])
-        # myVisualizationSum(sumActivations[0],hwArray[0][0],hwArray[0][1])
-        # myVisualizationfo(foActivations[0],hwArray[0][0],hwArray[0][1])
-        # exit(0)
-
-        # logging above variables
-        # print(h_hs.shape)
-        # print(o_hs.shape)
-        # print(inter_hs.shape)
-        # print(clip_cls_feature.shape)
-        # print(clip_hoi_score.shape)
-        # print(clip_visual.shape)
-        # done
-        # for making tsne plot
-        # interaction_feature_tsne = torch.mean(inter_hs[-1],dim=1)
-        # print(targets)
-        # print(inter_hs[-1].shape)
-        # exit(0)
 
         outputs_sub_coord = self.hum_bbox_embed(h_hs).sigmoid()
         outputs_obj_coord = self.obj_bbox_embed(o_hs).sigmoid()
@@ -279,25 +252,16 @@ class HOICLIP(nn.Module):
 
         if self.args.with_clip_label:
             logit_scale = self.logit_scale.exp()
-            # inter_hs = self.hoi_class_fc(inter_hs)
             outputs_inter_hs = inter_hs.clone()
-            # print(f"outputs_inter_hs : {outputs_inter_hs.shape}")
             verb_hs = self.inter2verb(inter_hs)                                       # O_verb
             inter_hs = inter_hs / inter_hs.norm(dim=-1, keepdim=True)                 # use this
             verb_hs = verb_hs / verb_hs.norm(dim=-1, keepdim=True)
             if self.args.dataset_file == 'hico' and self.args.zero_shot_type != 'default' \
                     and (self.args.eval or not is_training):
-                # logging ointer to npy file for prompt learning
-                # print(outputs_inter_hs[-1].shape)
-                # done
-                
-                # print(f"inter_hs : {inter_hs.shape}")
+
                 outputs_hoi_class = logit_scale * self.eval_visual_projection(inter_hs)
-                # print(f"outputs_hoi_class : {outputs_hoi_class.shape}")
                 outputs_verb_class = logit_scale * self.verb_projection(verb_hs) @ self.verb2hoi_proj_eval
-                # print(f"outputs_verb_class : {outputs_verb_class.shape}")
                 outputs_hoi_class = outputs_hoi_class + outputs_verb_class * self.verb_weight
-                # print(f"outputs_hoi_class : {outputs_hoi_class.shape}")
             else:
                 outputs_hoi_class = logit_scale * self.visual_projection(inter_hs)
                 outputs_verb_class = logit_scale * self.verb_projection(verb_hs) @ self.verb2hoi_proj
@@ -306,11 +270,9 @@ class HOICLIP(nn.Module):
             inter_hs = self.hoi_class_fc(inter_hs)
             outputs_inter_hs = inter_hs.clone()
             outputs_hoi_class = self.hoi_class_embedding(inter_hs)
-        # print(outputs_verb_class.shape)
         out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1], 'clip_visual': clip_visual,
                'clip_cls_feature': clip_cls_feature, 'hoi_feature': inter_hs[-1], 'clip_logits': clip_hoi_score}
-        # check dimension of above 
         if self.args.with_mimic:
             out['inter_memory'] = outputs_inter_hs[-1]
         if self.aux_loss:
@@ -379,27 +341,27 @@ class SetCriterionHOI(nn.Module):
         empty_weight[-1] = self.eos_coef
         self.register_buffer('empty_weight', empty_weight)
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        # change SS for ACMMM 2024 rebuttal
         if self.args.with_mimic:
             if self.args.vlm_model == 'clip':
                 self.clip_model, _ = clip.load(self.args.clip_model, device=device)
             elif self.args.vlm_model =='alip':
                 self.clip_model, _ = alip_load.load(self.args.vlm_model, self.args.vlm_model_path)
+            elif self.args.vlm_model == 'slip':
+                self.clip_model, _ = slip_load.load(self.args.vlm_model, self.args.vlm_model_path)
+            elif self.args.vlm_model == 'metaclip':
+                self.clip_model, _, _ = metaclip_load.load(model_name='ViT-B-32-worldwide@WorldWideCLIP', model_weight=self.args.vlm_model_path)
+
+
         else:
             self.clip_model = None
         self.alpha = self.args.alpha
 
-        # change SS: added the following members
         self.rho_eps = self.args.rho_eps
         self.hc_eps = self.args.hc_eps
         self.kappa = self.args.kappa
         self.obj_induced_interaction_relatedness = None # shape = [80, num_seen_inertactions]
         self.proposed_loss = self.args.proposed_loss
-
-        # for loss ablations
         self.ordis_factors = self.args.ordis_factors
-
-    # change SS: added cost argument in all the loss definitions
 
 
     def loss_obj_labels(self, outputs, targets, indices, num_interactions, opt_query_wise_hun_cost, log=True):
@@ -412,25 +374,7 @@ class SetCriterionHOI(nn.Module):
                                     dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
 
-
-        # change SS
-        # print(target_classes.shape)
-        # print(target_classes_o) # GT object labels for corresponding to every query match in every image
-        # print(f'obj preds [1][10]:\n {src_logits[1][10]}')
-        # print(f'obj preds [1][16]:\n {src_logits[1][16]}')
-        # src_scores = src_logits.sigmoid()
-        # obj_labels = F.softmax(src_scores, -1)[..., :-1].max(-1)[1]
-        # obj_labels = F.softmax(src_scores, -1)[0][0]
-        # print(f'obj labels predicted {obj_labels.shape}: {obj_labels}') # shape = (81,)
-        # query_wise_target_objs = target_classes[idx]
-        # print(f'query_wise_target_objs: {query_wise_target_objs}')
-        # exit(0)
-
-
-
         loss_obj_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
-        # print(loss_obj_ce.shape)
-        # exit(0)
         losses = {'loss_obj_ce': loss_obj_ce}
 
         if log:
@@ -465,13 +409,9 @@ class SetCriterionHOI(nn.Module):
         assert 'pred_hoi_logits' in outputs
         src_logits = outputs['pred_hoi_logits']
         dtype = src_logits.dtype
-        # print('print seen lists')
-        # print(self.args.seen_hoi2obj)
-        # print(self.args.seen_hoi2verb)
-
         idx = self._get_src_permutation_idx(indices)
 
-        # change SS: obtaining object label info for the matched queries
+        # obtaining object label info for the matched queries
         obj_label_info = torch.cat([t['obj_labels'][J] for t, (_, J) in zip(targets, indices)])
 
         target_classes_o = torch.cat([t['hoi_labels'][J] for t, (_, J) in zip(targets, indices)]).to(dtype)
@@ -479,32 +419,7 @@ class SetCriterionHOI(nn.Module):
         target_classes[idx] = target_classes_o
         src_logits = _sigmoid(src_logits)
 
-        # change SS
-        # print(f'permutation (list1 = batch, list2 = optimal query slots) {idx}')
-        
-        # print(target_classes.shape)
-        # print(target_classes_o.shape) #[total number of h/o pairs in the batch, number of training hoi classes]
-        # print(target_classes_o)
-        # 8 is the query slot which came out for first image
-        # print(target_classes[0][8])
-        
-        # print(f'interaction vector [0][8]:\n {target_classes[0][8]}\n')
-        # print(f'interaction vector [1][16]:\n {target_classes[1][16]}\n')
-
-        # print(src_logits[1][20])  
-        # for i in [10, 16]:      
-        #     pos_inds = target_classes[1][i].eq(1)
-        #     print(pos_inds)
-        #     print(f'pred sigmoid value of GT action(s): {src_logits[1][i][pos_inds]}')
-        #     print(f'max sigmoid pred at action {torch.argmax(src_logits[1][i])}')
-
-
-        # change SS: our proposed loss instead of usual focal loss
-        # loss_hoi_ce = self._obj_induced_focal_loss(src_logits, target_classes, opt_query_wise_hun_cost, obj_label_info, idx, weights=None, alpha=self.alpha, rho_eps=self.rho_eps, hc_eps=self.hc_eps, kappa=self.kappa)
-        # losses = {'loss_hoi_labels': loss_hoi_ce}
-
         if self.proposed_loss:
-            # print("My loss")
             loss_hoi_ce = self._obj_induced_focal_loss(src_logits, target_classes, opt_query_wise_hun_cost, obj_label_info, idx, weights=None, alpha=self.alpha, rho_eps=self.rho_eps, hc_eps=self.hc_eps, kappa=self.kappa)
         else:
             loss_hoi_ce = self._neg_loss(src_logits, target_classes, weights=None, alpha=self.alpha)
@@ -589,16 +504,6 @@ class SetCriterionHOI(nn.Module):
 
         neg_loss = (1 - alpha) * torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds
 
-        # change SS
-        # print(f'pos loss [1][10]=\n {pos_loss[1][10]}\n')
-        # print(f'neg loss [1][16]=\n {neg_loss[1][10]}\n')
-        # print(f'pos loss [1][16]=\n {pos_loss[1][16]}\n')
-        # print(f'neg loss [1][16]=\n {neg_loss[1][16]}\n')
-
-
-        # print(f'neg loss = {neg_loss[0][8]}')
-
-
         num_pos = pos_inds.float().sum() # total number of GT interactions in [bs, num_queries, num_seen_inters]
         pos_loss = pos_loss.sum()
         neg_loss = neg_loss.sum()
@@ -608,11 +513,7 @@ class SetCriterionHOI(nn.Module):
             loss = loss - neg_loss
         else:
             loss = loss - (pos_loss + neg_loss) / num_pos
-        #print(f"loss device: {loss.device}")
         return loss
-
-
-    # change SS
 
     def formulate_pa(self, betas, zetas, rhos, rho_eps):
 
@@ -635,7 +536,6 @@ class SetCriterionHOI(nn.Module):
     def _obj_induced_focal_loss(self, pred, gt, opt_query_wise_hun_cost, obj_label_info, perm, weights=None, alpha=0.25, rho_eps=1e-14, hc_eps=1e-7, kappa=-2):
 
         '''
-        
         pred: the predictions from interaction decoder (Q_i = [bs, num_queries, num_seen_interactions])
         gt  : the target interactions (T_i = [bs, num_queries, num_seen_interactions])
         cost_matrix: the cost matrix computed during Hungarian matching (C_i = [bs, num_queries, num_ho_pairs_in_batch])
@@ -643,113 +543,46 @@ class SetCriterionHOI(nn.Module):
         obj_label_info: target_classes_o as returned from loss_obj_labels(). An array of size [num_ho_pairs_in_batch] that contains matched-query-wise object ground truths.
         perm: the optimal permutations obtained from Hungarian matching
         '''
-        # print(f"pred: {pred.device}")
-        # print(f"gt: {gt.device}")
-        # print(f"opt_query_wise_hun_cost: {opt_query_wise_hun_cost.device}")
-        # print(f"obj_label_info: {obj_label_info.device}")
-        # print(f" perm: {perm[0].device}")
-        
         pos_inds = gt.eq(1).float()
         neg_inds = gt.lt(1).float()
 
         # compute confidence magnitude (beta)
-        #print(perm)
-        #print(opt_query_wise_hun_cost)
         bs, num_queries, num_classes = gt.shape
         betas = torch.zeros(bs, num_queries)
         betas[perm] = torch.log(1 + torch.pow(torch.add(opt_query_wise_hun_cost, hc_eps), -kappa)) # working index wise but check computed value
         betas = betas.unsqueeze(2).repeat(1, 1, num_classes)
-        
         betas = betas.to(gt.device)
-        
-        # print('check valid betas') => verified correctness!
-        # print(f'betas shape = {betas.shape}')
-        # print(betas[0][6])
-        # print(betas[4][44])
-        # print(betas[4][59])
-        # print(betas[6][39])
-        # print(betas[0][18])
-        
+
         # compute object-induced scaling factor (rho)
         rhos = torch.zeros(gt.shape)
-        # print(self.obj_induced_interaction_relatedness)
-        # print(self.obj_induced_interaction_relatedness.sum())
-        # print(self.obj_induced_interaction_relatedness.shape)
-
-
         rhos[perm] = (self.obj_induced_interaction_relatedness[obj_label_info])
-        # rhos[perm] = (self.obj_induced_interaction_relatedness.detach()[obj_label_info])
-
-        # rhos[perm] = (int(obj_label_info.sum()))
         rhos = rhos.to(gt.device)
-        # print(rhos)
-        # exit(0)
-        # rhos => verify later
 
-
-        # print(pos_inds[perm].shape)   # shape = [num_ho_pairs_in_batch, num_interactions]
-        # print(pos_inds[perm])
- 
         # compute discrepancy scores of each interaction
         query_wise_num_pos = pos_inds[perm].float().sum(axis=1) 
         # [num_ho_pairs_in_batch] array: ele = entry[i] denotes we have "ele" number of GT interactions for ith matched query slot
         zetas = torch.zeros(gt.shape)
         gt_scores = pred[perm] * pos_inds[perm] # shape = [num_ho_pairs_in_batch, num_interactions] 
-        # print(f'gt_scores shape = {gt_scores.shape}')
-        # print(gt_scores.sum(axis=1))
-        # print(f'query wise GT counts: \n{query_wise_num_pos}')
 
         avg_gt_scores = torch.div(gt_scores.sum(axis=1), query_wise_num_pos).unsqueeze(1).repeat(1, num_classes)
-        # print(avg_gt_scores)
         discrepancy = (pred[perm] - avg_gt_scores) * neg_inds[perm] # keeping non-zero discrepancy only for the non-GT preds
        
         zetas = zetas.to(discrepancy.device)
-        # print(f"zetas device: {zetas.device}")
-        # print(f"discrepancy device: {discrepancy.device}")
+
         zetas[perm] = discrepancy
-        # print(zetas)
-        # exit(0)
 
-        # compute interactive penalty actuator
-        # the actuator produces the loss terms in a controlled way according to the object-induced interactiveness, when prediction signals are supplied by the model
-        # print(f"betas:{betas.device}")
-        # print(f"rhos:{rhos.device}")
-        
         penalty_actuator = self.formulate_pa(betas, zetas, rhos, rho_eps) # [bs, num_queries, num_seen_interactions]
-        # print(f"penalty_actuator:{penalty_actuator.device}")
-        # print(f"pos_inds:{pos_inds.device}")
-        loss = 0
 
-        # remove this
-        # penalty_actuator = torch.sigmoid(betas * torch.div(zetas, ( rho_eps + 2.0))) # [bs, num_queries, num_seen_interactions]
+        loss = 0
 
         pos_loss = penalty_actuator * alpha * torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds
         
         if weights is not None:
             pos_loss = pos_loss * weights[:-1]
         
-
         neg_loss = penalty_actuator * (1 - alpha) * torch.log(1 - pred) * torch.pow(pred, 2) * neg_inds
 
-        # change SS
-        # print(f'pos loss [1][10]=\n {pos_loss[1][10]}\n')
-        # print(f'neg loss [1][16]=\n {neg_loss[1][10]}\n')
-        # print(f'pos loss [1][16]=\n {pos_loss[1][16]}\n')
-        # print(f'neg loss [1][16]=\n {neg_loss[1][16]}\n')
-        # print(f'perm: {perm}')
-        # print(f'q costs: {opt_query_wise_hun_cost}')
-        # print(neg_loss.shape)
-        # print(pos_loss.shape)
-        # print(f'neg loss = {neg_loss[0][8]}')
-
-
         num_pos = pos_inds.float().sum() # total number of GT interactions in [bs, num_queries, num_seen_inters]
-        # rowsum_pos, rowsum_neg = torch.sum(pos_loss, 1), torch.sum(neg_loss, 1)
-        # print(f'pos loss shape: {torch.div(torch.sum(rowsum_pos, 1), num_pos).shape}')
-        # print(f'neg loss shape: {torch.div(torch.sum(rowsum_neg, 1), num_pos).shape}')
-        # print(f'pos loss: {torch.div(torch.sum(rowsum_pos, 1), num_pos)}')
-        # print(f'neg loss: {torch.div(torch.sum(rowsum_neg, 1), num_pos)}')
-
         pos_loss = pos_loss.sum()
         neg_loss = neg_loss.sum()
 
@@ -759,13 +592,8 @@ class SetCriterionHOI(nn.Module):
             loss = loss - neg_loss
         else:
             loss = loss - (pos_loss + neg_loss) / num_pos
-        # print(f"my loss: {loss}")  
-        # exit(0)
+
         return loss
-
-
-
-
 
 
     def _get_src_permutation_idx(self, indices):
@@ -774,7 +602,6 @@ class SetCriterionHOI(nn.Module):
         src_idx = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx
 
-    # change SS: added cost argument
     def get_loss(self, loss, outputs, targets, indices, num, opt_query_wise_hun_cost, **kwargs):
         if 'pred_hoi_logits' in outputs.keys():
             loss_map = {
@@ -798,12 +625,8 @@ class SetCriterionHOI(nn.Module):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
         # Retrieve the matching between the outputs of the last layer and the targets
-
-        # change SS: modified outputs from matcher 
+        # modified outputs from matcher 
         indices, opt_query_wise_hun_cost = self.matcher(outputs_without_aux, targets)
-        #change SS
-        # print(f'Hungarian algo output shape: {len(indices)}')
-        # print(indices)
 
         num_interactions = sum(len(t['hoi_labels']) for t in targets)
         num_interactions = torch.as_tensor([num_interactions], dtype=torch.float,
@@ -815,13 +638,11 @@ class SetCriterionHOI(nn.Module):
         # Compute all the requested losses
         losses = {}
         for loss in self.losses:
-            # change SS: added cost argument
+            # added cost argument
             losses.update(self.get_loss(loss, outputs, targets, indices, num_interactions, opt_query_wise_hun_cost))
 
-        # exit(0)
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
-            # print('Using auxiliary losses') => being used indeed
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 indices, opt_query_wise_hun_cost = self.matcher(aux_outputs, targets)
                 for loss in self.losses:

@@ -39,15 +39,10 @@ class GEN_VLKT(nn.Module):
         for t in targets:
             if t['obj_boxes'].shape[0] == 0 or t['human_img'].shape[0] == 0 or t['hoi_area_img'].shape[0] == 0:
                 continue
-            # print(f"human_img: {t['human_img'].shape}")
             h_feature = self.clip_model.encode_image(t['human_img'])[0]
             o_feature = self.clip_model.encode_image(t['object_img'])[0]
             hoi_feature = self.clip_model.encode_image(t['hoi_area_img'])[0]
             verb_feature = hoi_feature.clone() * 2 - o_feature.clone() - h_feature.clone()
-
-            # h_feature = h_feature / h_feature.norm(dim=1, keepdim=True)
-            # o_feature = o_feature / o_feature.norm(dim=1, keepdim=True)
-            # hoi_feature = hoi_feature / hoi_feature.norm(dim=1, keepdim=True)
             if h_feature.shape[0] != o_feature.shape[0] or h_feature.shape[0] != hoi_feature.shape[0]:
                 raise ValueError
 
@@ -59,11 +54,6 @@ class GEN_VLKT(nn.Module):
             if obj_label.max() > 80 or hoi_label.max() >= 600:
                 raise ValueError
             ver_label = torch.tensor(HOI_IDX_TO_ACT_IDX)[hoi_label]
-
-            # print(f"obj_label: {obj_label}")
-            # print(f"hoi_label: {hoi_label}")
-
-
 
             if torch.isnan(o_feature.sum()) or torch.isnan(hoi_feature.sum()) or torch.isnan(h_feature.sum()):
                 print(obj_label)

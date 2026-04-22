@@ -49,10 +49,6 @@ class HungarianMatcherHOI(nn.Module):
 
         tgt_sub_boxes = torch.cat([v['sub_boxes'] for v in targets])
         tgt_obj_boxes = torch.cat([v['obj_boxes'] for v in targets])
-        #change SS
-        # print(f'sub: {tgt_sub_boxes}')
-        # print(f'obj: {tgt_obj_boxes}')
-
 
         if out_sub_bbox.dtype == torch.float16:
             out_sub_bbox = out_sub_bbox.type(torch.float32)
@@ -78,39 +74,20 @@ class HungarianMatcherHOI(nn.Module):
 
         # C denotes the cost matrix of the bipartite graph
         C = C.view(bs, num_queries, -1).cpu()
-        #change SS
         sizes_obj = [len(v['obj_boxes']) for v in targets]
-        # print(f'Sizes of obj_boxes: {sizes_obj}')
 
         sizes = [len(v['sub_boxes']) for v in targets]
-        # print(f'C: {C.shape}')
-        # print(f'Sizes of sub_boxes: {sizes}')
-        # for i, c in enumerate(C.split(sizes, -1)):
-            # print(c[i].shape)
-
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
 
-        #change SS
         hun_cost = []
         opt_query_wise_hun_cost = torch.cat([C[i, q_id, ho_pair_id] for i, (q_id, ho_pair_id) in enumerate(indices)])
-        # print(f'optimal query wise cost shape = {opt_query_wise_hun_cost.shape}')
-        # print(opt_query_wise_hun_cost)
+
 
         for i in range(len(sizes)):
             q_id, ho_pair_id = indices[i][0], indices[i][1]
-            # print(q_id, ho_pair_id)
-            # print(torch.log(1 + torch.pow(C[i, indices[i][0], indices[i][1]], 2)))
+
             hun_cost.append(C[i, indices[i][0], indices[i][1]])
-        # verified correctness
-        # print(C[0][8][0])
-        # print(C[1][10][1])
-        # print(C[1][16][1])
-        # print(C[7][11][0])
-        # print(C[7][21][1])
 
-        # print(f'Hungarian cost: {hun_cost}')
-
-        # change SS - returned optimal query wise hungarian cost
         return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices], opt_query_wise_hun_cost
 
 

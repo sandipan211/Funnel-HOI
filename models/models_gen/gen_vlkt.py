@@ -158,9 +158,7 @@ class GEN_VLKT(nn.Module):
             outputs_inter_hs = inter_hs.clone()
             outputs_hoi_class = self.hoi_class_embedding(inter_hs)
 
-        # out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
-        #        'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
-
+   
         out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1],
                'clip_visual': clip_visual,

@@ -98,15 +98,6 @@ class GEN(nn.Module):
         clip_visual = clip_visual.to(dtype)
         with torch.no_grad():
             clip_hoi_score = clip_cls_feature @ self.hoi_cls.T
-            # obj_score = clip_cls_feature @ self.obj_cls.T
-            # obj_hoi_score = obj_score @ self.obj2hoi_proj
-
-            # verb_score = clip_cls_feature @ self.verb_cls.T
-            # verb_hoi_score = verb_score @ self.verb2hoi_proj
-            # clip_hoi_score += verb_hoi_score * 0.1
-            # ignore_idx = clip_hoi_score.sort(descending=True).indices[:, self.topk:]
-            # for idx, igx in enumerate(ignore_idx):
-            #     clip_hoi_score[idx][igx] *= 0
             clip_hoi_score = clip_hoi_score.unsqueeze(1)
         clip_cls_feature = clip_cls_feature.unsqueeze(1).repeat(1, num_queries, 1)
 
