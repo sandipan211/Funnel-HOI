@@ -18,8 +18,9 @@ import datasets.transforms as T
 from datasets.hico_text_label import hico_text_label, hico_unseen_index
 from datasets.static_hico import HOI_IDX_TO_OBJ_IDX, HOI_IDX_TO_ACT_IDX
 
-# change SS for ACMMM 20204 rebuttal - experimenting with ALIP
 import ALIP.src.open_alip.my_alip_load as alip_load
+import SLIP.my_slip_load as slip_load
+import MetaCLIP.src.mini_clip.my_metaclip_load as metaclip_load
 
 class HICODetection(torch.utils.data.Dataset):
     def __init__(self, img_set, img_folder, anno_file, clip_feats_folder, transforms, num_queries, args):
@@ -54,9 +55,6 @@ class HICODetection(torch.utils.data.Dataset):
                     tmp.append(k)
             self.text_label_ids = tmp
 
-
-        # change SS - considering UC cases. Check if this also holds true for UO and UA.
-        # 11-1-24: should work for UO and UV
         all_hois = set([i for i in range(600)])
         self.seen_hois = list(all_hois - set(self.unseen_index))
         self.seen_hoi2obj = torch.Tensor([HOI_IDX_TO_OBJ_IDX[ind] for ind in self.seen_hois]).long()    
@@ -69,24 +67,6 @@ class HICODetection(torch.utils.data.Dataset):
 
         for obj_ind in torch.unique(self.seen_hoi2obj):
             self.obj_hoi_co_occurrence[obj_ind] = self.seen_hoi2obj.eq(obj_ind).float()
-
-        # so obj_hoi_co_occurrence basically stores a 1 if object is associated with a certain HOI in a given object row, else stores 0
-        
-        # collect the object and verb ids from the text label seens
-        # hico_text_label_objs = []
-        # hico_text_label_verbs = [] 
-        # for i, (v, o) in enumerate(self.text_label_ids):
-        #     hico_text_label_objs.append(o)
-        #     hico_text_label_verbs.append(v)
-
-        # print(self.seen_hoi2verb)
-        # print(hico_text_label_verbs)
-        # print(self.seen_hoi2obj)
-        # print(hico_text_label_objs)
-
-        # seen_hoi2verb and hico_text_label_verbs have the same order and are same
-
-
 
         total_anno = 0
         skip_anno = 0
@@ -119,10 +99,6 @@ class HICODetection(torch.utils.data.Dataset):
                     img_anno['hoi_annotation'] = new_img_anno
                 total_anno += len(new_img_anno)
 
-                # import cv2
-                # import os
-                # data_root = os.path.join(os.getcwd(), 'data/hico_20160224_det/images/train2015')
-                # image = cv2.imread(os.path.join(data_root, img_anno['file_name']))
         else:
             if not (args.videoDemo):
                 self.ids = list(range(len(self.annotations)))
@@ -150,15 +126,16 @@ class HICODetection(torch.utils.data.Dataset):
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # _, self.clip_preprocess = clip.load(args.clip_model, device)
-
-        # change SS for ACMMM 20204 rebuttal
-        # args.clip_model denotes vit version
+    
         if args.vlm_model== 'clip':
             _, self.clip_preprocess = clip.load(args.clip_model, device)
         elif args.vlm_model == 'alip':
-            # print('Using ALIP as VLM model in hico.py')
             _, self.clip_preprocess = alip_load.load(args.clip_model, args.vlm_model_path)
+        elif args.vlm_model == 'slip':
+            _, self.clip_preprocess = slip_load.load(args.clip_model, args.vlm_model_path)
+        elif args.vlm_model == 'metaclip':
+            _, _, self.clip_preprocess = metaclip_load.load(model_name='ViT-B-32-worldwide@WorldWideCLIP', model_weight=args.vlm_model_path)
+
 
     def __len__(self):
         return len(self.ids)
@@ -205,8 +182,7 @@ class HICODetection(torch.utils.data.Dataset):
                 img, target = self._transforms[1](img_0, target_0)
             clip_inputs = self.clip_preprocess(img_0)
             target['clip_inputs'] = clip_inputs
-            # print(f'Preprocessed clip inputs shape = {clip_inputs.shape}') # shape: [3, 224, 224]
-            # exit(0)
+
             kept_box_indices = [label[0] for label in target['labels']]
 
             target['labels'] = target['labels'][:, 1]
@@ -215,7 +191,6 @@ class HICODetection(torch.utils.data.Dataset):
             sub_obj_pairs = []
             hoi_labels = []
             for hoi in img_anno['hoi_annotation']:
-                # print('hoi: ', hoi)
                 if hoi['subject_id'] not in kept_box_indices or hoi['object_id'] not in kept_box_indices:
                     continue
                 verb_obj_pair = (self._valid_verb_ids.index(hoi['category_id']),
