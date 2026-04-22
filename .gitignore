@@ -1,0 +1,9 @@
+# add file extensions to ignore
+# for example, to ignore all .log files, add:
+*.log
+# ignore specific directories   
+# for example, to ignore the 'temp' directory, add:
+__pycache__
+
+# ignore specific extensions
+*.tmp
