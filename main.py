@@ -1,44 +1,37 @@
 import argparse
 import os
 os.environ["CUBLAS_WORKSPACE_CONFIG"]=":4096:8" 
-
 import datetime
 import json
 import random
 import time
 from pathlib import Path
 import logging
-
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-
 import datasets
 import util.misc as utils
 from datasets import build_dataset
 from engine import train_one_epoch, evaluate_hoi
 from models import build_model
-import os
 import gc
-# import wandb
 import typing
 from collections import Counter
-# import collections.abc as container_abcs
-
 from flopth import flopth
-# import math
-# from fvcore.nn import flop_count, FlopCountAnalysis
-# from fvcore.nn.jit_handles import batchnorm_flop_jit, matmul_flop_jit, generic_activation_jit, get_shape
-# from models.models_hoiclip.hoiclip import hwArray,adaptiveAverageActivations,sumActivations,foActivations,adaptiveAverageGradients,sumGradients,foGradients
-
 from setproctitle import setproctitle
-setproctitle("paul_BTP_ZSHOI")
+setproctitle("ZSHOI")
 
 from util.scheduler import CosineAnnealingLRWarmup, MultiStepLRWarmup
-from collections import Counter
+
 import clip
 import ALIP.src.open_alip.my_alip_load as alip_load
 from ALIP.src.open_alip import tokenize as alip_tokenize
+from SLIP.tokenizer import SimpleTokenizer as SLIP_Tok
+import SLIP.my_slip_load as slip_load 
+import MetaCLIP.src.mini_clip.my_metaclip_load as metaclip_load
+from MetaCLIP.src.mini_clip.factory import get_tokenizer as metaclip_tokenize
+
 from datasets.hico_text_label import hico_text_label, hico_obj_text_label, hico_verb_text_label, hico_unseen_index
 from datasets.vcoco_text_label import *
 
@@ -48,10 +41,7 @@ def setup_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
-    #Below line is by Akshit
-    #os.environ["CUBLAS_WORKSPACE_CONFIG"]="4096:8" 
-
-
+    
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
@@ -212,7 +202,7 @@ def get_args_parser():
     parser.add_argument('--rec_loss_coef', default=2, type=float)
     parser.add_argument('--no_training', action='store_true', help='')
     parser.add_argument('--dataset_root', default='GEN', help='')
-    parser.add_argument('--model_name', default='GEN', help='')
+    parser.add_argument('--model_name', default='Funnel-HOI', help='')
     parser.add_argument('--eval_location', action='store_true', help='')
     # DAB
     parser.add_argument('--enable_cp', action='store_true',
@@ -240,10 +230,8 @@ def get_args_parser():
     # zero shot enhancement
     parser.add_argument('--training_free_enhancement_path', default='', type=str)
     
-    # mine
-    # parser.add_argument('--save_points', default=0, type=int)
+    # ablations
     parser.add_argument('--num_cross_attention_layers', default=3, action='store_true')
-    # parser.add_argument('--wandb_enable', default=False, action='store_true')
     parser.add_argument('--concat_v_fo', action='store_true')
     parser.add_argument('--gated_cross_attn', action='store_true')
     parser.add_argument('--onlyFo', action='store_true')
@@ -257,12 +245,14 @@ def get_args_parser():
     parser.add_argument('--rel_alpha', default=0.5, type=float)
     parser.add_argument('--ko', default=5, type=int)
     parser.add_argument('--kv', default=5, type=int)
+    parser.add_argument('--noise_alpha', default=0.1, type=float)
+    parser.add_argument('--noisy_eval', action='store_true', help='test with perturbed object features')
     parser.add_argument('--fvPromptLearning', action='store_true')
     parser.add_argument('--prompt_learning_alpha', default=0.1, type=float)
     parser.add_argument('--videoDemo', action='store_true')
     parser.add_argument('--efficiency_report', action='store_true')
     parser.add_argument('--ordis_factors', default='default', help='default, beta, zeta, delta, beta_delta, beta_zeta, zeta_delta')
-    # testing iwth other VLM models
+    # testing with other VLM models
     parser.add_argument('--vlm_model', default='clip', help='VLM model to use')
     parser.add_argument('--vlm_model_path', default='', help='VLM model path to load from')
     parser.add_argument('--num_visualize', default=-1, type=int, help='Number of images to visualize (keep a multiple of batch size); -1 if all')
@@ -275,18 +265,7 @@ def get_report(model, data_loader_test, device, args):
     
     model.to(device)
     model.train()
-    # sample, target = next(iter(data_loader_test))
-    # clip_img = torch.stack([v['clip_inputs'] for v in target]).to(device)
-    # print(isinstance(sample, list))
     sample = torch.randn((args.batch_size, 3, 765, 911)).to(device)
-    # using FlopCountAnalysis
-    # flops = FlopCountAnalysis(model, inputs=(sample, clip_img))
-    # print(flops.total())
-
-    # using flopth
-    # Actual criteria should be: Similar to DETR [1], we compute the FLOPS with the tool flop_count_operators from 
-    # Detectron2 [36] for the first 100 images in the V-COCO test set and calculate 
-    # the average numbers. => as said in CVPR 2022 paper named  "Human-Object Interaction Detection via Disentangled Transformer"
     flops, params = flopth(model, inputs=(sample,))
     print(flops, params)
 
@@ -308,8 +287,6 @@ def obj_verb_relatedness(args):
     # get object semantics based on just the object name as prompt
     # expected output shape: total_num_objects x clip_dim 
 
-    # change SS for ACMMM 20204 rebuttal
-    # args.clip_model denotes vit version
     if args.vlm_model== 'clip':
         print('Using CLIP as VLM model')
         clip_model, _ = clip.load(args.clip_model)
@@ -318,7 +295,14 @@ def obj_verb_relatedness(args):
         print('Using ALIP as VLM model')
         clip_model, _ = alip_load.load(args.clip_model, args.vlm_model_path)
         my_tokenizer = alip_tokenize
-
+    elif args.vlm_model == 'slip':
+        print('Using SLIP as VLM model')
+        clip_model, _ = slip_load.load(args.clip_model, args.vlm_model_path)
+        my_tokenizer = SLIP_Tok()
+    elif args.vlm_model == 'metaclip':
+        print('Using MetaCLIP as VLM model')
+        clip_model, _, _ = metaclip_load.load(model_name='ViT-B-32-worldwide@WorldWideCLIP', model_weight=args.vlm_model_path)
+        my_tokenizer = metaclip_tokenize()
 
     if args.dataset_file == 'hico':
         verb_file = hico_verb_text_label
@@ -330,15 +314,20 @@ def obj_verb_relatedness(args):
     total_num_objects=len(obj_file)
     objects=[obj_file[i][1].split() for i in range(total_num_objects)]
     objects=[' '.join(objects[i][4:]) for i in range(len(objects))]
-    # print(objects)
-    # text_inputs_o=torch.cat([clip.tokenize(o) for o in objects]).to("cuda")
-    text_inputs_o=torch.cat([my_tokenizer(o) for o in objects]).to("cuda")
+
+    unsqueeze_tok_output = False
+    if my_tokenizer("test").dim() == 1:
+        # need for SLIP tokenizer
+        unsqueeze_tok_output = True
+    if unsqueeze_tok_output:
+        text_inputs_o=torch.cat([my_tokenizer(o).unsqueeze(0) for o in objects]).to("cuda")
+    else:
+        text_inputs_o=torch.cat([my_tokenizer(o) for o in objects]).to("cuda")
 
     clip_text_embeddings_o=clip_model.encode_text(text_inputs_o).to("cuda")  # need to add line to check if clip model on cuda or not
     clip_text_embeddings_o=clip_text_embeddings_o.float() # shape: [num_objects, 512]
     clip_text_embeddings_o=clip_text_embeddings_o[:total_num_objects-1,:]
     # print(f"this size should be 80 {clip_text_embeddings_o.shape}")
-    # return clip_text_embeddings_o.detach()
 
 
     # get verb semantics based on just the verb-ing name as prompt
@@ -346,41 +335,31 @@ def obj_verb_relatedness(args):
     total_num_verbs=len(verb_file)
     verbs=[verb_file[i].split() for i in range(total_num_verbs)]
     verbs=[' '.join(verbs[i][5:]) for i in range(len(verbs))]
-    # print(verbs)
-    # text_inputs_v=torch.cat([clip.tokenize(o) for o in verbs]).to("cuda")
-    text_inputs_v=torch.cat([my_tokenizer(o) for o in verbs]).to("cuda")
+    
+    if unsqueeze_tok_output:
+        text_inputs_v=torch.cat([my_tokenizer(o).unsqueeze(0) for o in verbs]).to("cuda")
+    else:
+        text_inputs_v=torch.cat([my_tokenizer(o) for o in verbs]).to("cuda")
     clip_text_embeddings_v=clip_model.encode_text(text_inputs_v).to("cuda")  # need to add line to check if clip model on cuda or not
     clip_text_embeddings_v=clip_text_embeddings_v.float()
-    # print(clip_text_embeddings_v)
     # print(f"this size should be 117x512 {clip_text_embeddings_v.shape}")
-    # exit(0)
-    # return clip_text_embeddings_v.detach()
+   
     rel_clip = torch.matmul(clip_text_embeddings_o, clip_text_embeddings_v.T)
     # assert torch.min(rel_clip) >= -1 and torch.max(rel_clip) <= 1 # found to be False
     rel_clip = normalize_to_range(rel_clip)
     assert torch.min(rel_clip) >= -1 and torch.max(rel_clip) <= 1 # found to be True
-
     rel_cnet=rel_cnet.to("cuda")
-    # print(rel_cnet.device)
-    # print(rel_clip.device)
+
     rho_obj_action = args.rel_alpha * rel_clip + (1 - args.rel_alpha) * rel_cnet
     assert torch.min(rho_obj_action) >= -1 and torch.max(rho_obj_action) <= 1 # found to be True
-
 
     # hardcoded change to replace no_interaction rho with predetermined values
     if args.dataset_file == 'hico':
         rho_obj_action[:, 57] = -args.rho_eps - 1.0
 
-    print(f'relatedness matrix shape = {rho_obj_action.shape}')
-    # exit(0)
-        
+    print(f'relatedness matrix shape = {rho_obj_action.shape}')        
     return rho_obj_action
 
-
-
-
-
-# change SS
 def get_obj_induced_interaction_relatedness(relatedness_matrix, seen_info):
         
     obj_hoi_co_occurrence = seen_info['obj_hoi_co_occurrence']
@@ -402,30 +381,23 @@ def main(args):
 
     save_points = []
     if not args.eval:
-        # save_points = list(range(0,(args.epochs+1),20))
         save_points=[ep - 2 for ep in args.lr_drop_list]
         print(f"savepoints: {save_points}")
 
     print('setting up seeds')
     setup_seed(233)
-
-    # sys.exit(0)
-
     print("git:\n  {}\n".format(utils.get_sha()))
 
     if args.frozen_weights is not None:
         assert args.masks, "Frozen training is meant for segmentation only"
     print(args)
     
-    # change SS: save arguments for verification later
     with open(Path(args.output_dir) / "args_list.txt", 'a') as f:
         now = datetime.datetime.now()
         f.write("Started new run at " + now.strftime("%d/%m/%Y %H:%M:%S") + '\n')
         f.write(str(args)+'\n')
 
     device = torch.device(args.device)
-
-    # change SS
     if os.path.exists('analysis.txt'):
         os.remove('analysis.txt')
 
@@ -436,15 +408,11 @@ def main(args):
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
-    #os.environ["CUBLAS_WORKSPACE_CONFIG"]="4096:8" 
-
-
     args.relatedness_matrix = obj_verb_relatedness(args)
 
     model, criterion, postprocessors = build_model(args)
     model.to(device)
     print('****************')
-    # print(model)
     print(args.model_name)
     print('****************')
 
@@ -455,8 +423,6 @@ def main(args):
         else:
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
             model_without_ddp = model.module
-
-    # model = convert_syncbn_model(model)
 
     for name, p in model.named_parameters():
         if 'eval_visual_projection' in name:
@@ -543,10 +509,7 @@ def main(args):
     print('number of params:', n_parameters)
 
     if args.opt_sched == 'multiStep':
-        lr_scheduler = MultiStepLRWarmup(optimizer, args.lr_drop_list, warmup_iter=0, warmup_ratio=0.01,
-                                         gamma=args.lr_drop_gamma)
-        # lr_scheduler = MultiStepLRWarmup(optimizer, [args.lr_drop], warmup_iter=0, warmup_ratio=0.01,
-        #                                  gamma=args.lr_drop_gamma)
+        lr_scheduler = MultiStepLRWarmup(optimizer, args.lr_drop_list, warmup_iter=0, warmup_ratio=0.01, gamma=args.lr_drop_gamma)
     elif args.opt_sched == 'cosine':
         lr_scheduler = CosineAnnealingLRWarmup(optimizer, verbose=False,
                                                warmup_iter=500,
@@ -560,20 +523,16 @@ def main(args):
     if(not args.videoDemo):
         # train dataloader initialization
         dataset_train = build_dataset(image_set='train', args=args)
-
-        # change SS
         seen_info = {
             'seen_hoi2obj': dataset_train.seen_hoi2obj,
             'seen_hoi2verb': dataset_train.seen_hoi2verb,
             'obj_hoi_co_occurrence': dataset_train.obj_hoi_co_occurrence
         }
         criterion.obj_induced_interaction_relatedness = get_obj_induced_interaction_relatedness(args.relatedness_matrix, seen_info)
-        # change AT:
         criterion.obj_induced_interaction_relatedness = criterion.obj_induced_interaction_relatedness.detach()
 
         if args.distributed:
             sampler_train = DistributedSampler(dataset_train)
-
         else:
             sampler_train = torch.utils.data.RandomSampler(dataset_train)
 
@@ -584,8 +543,8 @@ def main(args):
         data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                     collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
-    # test and val dataloader initialization
 
+    # test and val dataloader initialization
     test_split = 'val'
     dataset_val = build_dataset(image_set='val', args=args)
     dataset_test = build_dataset(image_set=test_split, args=args)
@@ -629,7 +588,7 @@ def main(args):
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
 
-            # change SS: do this part if you want to add more lr drops while your code has already run for k times
+            # do this part if you want to add more lr drops while your code has already run for k times
             if args.extend_lr_drop_list:
                 lr_drops = args.lr_drop_list
                 # make sure you have added the lr drop epochs in the script to run
@@ -638,42 +597,12 @@ def main(args):
                 # print(lr_scheduler.milestones)
             args.start_epoch = checkpoint['epoch'] + 1
 
-        # if args.enable_amp:
-        #     amp.load_state_dict(checkpoint['amp'])
-
     elif args.pretrained:
         checkpoint = torch.load(args.pretrained, map_location='cpu')
         if args.eval:
             model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
         else:
             model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
-
-    # hooks to visualize intermediate layer activations
-    # hooks = [
-    #     model.transformer.register_forward_hook(
-    #         lambda self, input, output: hwArray.append((input[0].shape[-2],input[0].shape[-1]))
-    #     ),
-    #     model.transformer.encoder.layers[-1].m.register_forward_hook(
-    #         lambda self, input, output: adaptiveAverageActivations.append(output)
-    #     ),
-    #     model.transformer.encoder.layers[-1].m.register_backward_hook(
-    #         lambda self, input, output: adaptiveAverageGradients.append(output)
-    #     ),
-    #     model.transformer.encoder.layers[-1].sumModule1.register_forward_hook(
-    #         lambda self, input, output: sumActivations.append(output)
-    #     ),
-    #     model.transformer.encoder.layers[-1].sumModule1.register_backward_hook(
-    #         lambda self, input, output: sumGradients.append(output)
-    #     ),
-    #     model.transformer.encoder.layers[-1].co_attention1.register_forward_hook(
-    #         lambda self, input, output: foActivations.append(output)
-    #     ),
-    #     model.transformer.encoder.layers[-1].co_attention1.register_backward_hook(
-    #         lambda self, input, output: foGradients.append(output)
-    #     ),
-    # ]
-    # for hook in hooks:
-    #     hook.remove()
 
     if args.eval:
         
@@ -682,7 +611,7 @@ def main(args):
             get_report(model, data_loader_test, device, args)
         
         else:
-            # change SS: check if num_visualize is a multiple of batch size - only then rest of the code works smoothly
+            # check if num_visualize is a multiple of batch size - only then rest of the code works smoothly
             if args.num_visualize != -1 and args.num_visualize  % args.batch_size != 0:
                 print('num_visualize should be a multiple of batch size and less than 10000')
                 exit(0)
@@ -698,22 +627,18 @@ def main(args):
                                         args.subject_category_id, device, args)
 
                 if args.output_dir and utils.is_main_process():
-                    #  add eval in log for my convenience
+                    #  add eval in log for convenience
                     with (output_dir / "log.txt").open("a") as f:
                         f.write('Test result:' + json.dumps(test_stats) + "\n")
                     LOGGER.info('Epoch Test: [{}] '.format('eval') + json.dumps(test_stats))
-            # print(hwArray)
-            # print(adaptiveAverageActivations)
-            # print(sumActivations)
-            # print(foActivations)
-            # exit(0)
+       
             if 'Val result:' not in previous_log:
                 print('Evaluating in val split!')
                 test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val,
                                         args.subject_category_id, device, args)
 
                 if args.output_dir and utils.is_main_process():
-                    #  add eval in log for my convenience
+                    #  add eval in log for convenience
                     with (output_dir / "log.txt").open("a") as f:
                         f.write('Val result:' + json.dumps(test_stats) + "\n")
                     LOGGER.info('Epoch Val: [{}] '.format('eval') + json.dumps(test_stats))
@@ -738,10 +663,7 @@ def main(args):
             best_performance = 0
 
     print("Start training")
-    # change SS
-    # print('print seen lists')
-    # print(dataset_train.seen_hoi2obj)
-    # print(dataset_train.seen_hoi2verb)
+    
     seen_info = {
         'seen_hoi2obj': dataset_train.seen_hoi2obj,
         'seen_hoi2verb': dataset_train.seen_hoi2verb,
@@ -761,30 +683,22 @@ def main(args):
         if args.distributed:
             sampler_train.set_epoch(epoch)
 
-        # change SS: additionally giving seen_info to epoch training 
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm, lr_scheduler,
-            args.gradient_accumulation_steps, args.enable_amp, args.no_training, args)
-        # if(args.wandb_enable == True):
-        #     wandb.log({
-        #         'epoch': epoch,
-        #         'train_map': train_stats['mAP']
-        #     })
+            args.gradient_accumulation_steps, args.enable_amp, args.no_training, args, seen_info=seen_info)
+      
         lr_scheduler.step()
-        # if epoch == args.epochs - 1:
         checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
         utils.save_on_master({
                                  'model': model_without_ddp.state_dict(),
                                  'optimizer': optimizer.state_dict(),
                                  'lr_scheduler': lr_scheduler.state_dict(),
-                                 # 'amp': amp.state_dict(),
                                  'epoch': epoch,
                                  'args': args,
                              } if args.enable_amp else {
             'model': model_without_ddp.state_dict(),
             'optimizer': optimizer.state_dict(),
             'lr_scheduler': lr_scheduler.state_dict(),
-            # 'amp': None,
             'epoch': epoch,
             'args': args,
         }, checkpoint_path)
@@ -804,14 +718,12 @@ def main(args):
                                      'model': model_without_ddp.state_dict(),
                                      'optimizer': optimizer.state_dict(),
                                      'lr_scheduler': lr_scheduler.state_dict(),
-                                     # 'amp': amp.state_dict(),
                                      'epoch': epoch,
                                      'args': args,
                                  } if args.enable_amp else {
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'lr_scheduler': lr_scheduler.state_dict(),
-                # 'amp': None,
                 'epoch': epoch,
                 'args': args,
             }, checkpoint_path)
@@ -838,7 +750,7 @@ def main(args):
                 f.write(json.dumps(log_stats) + "\n")
             LOGGER.info('Epoch: [{}] '.format(epoch) + json.dumps(log_stats))
 
-            #  add eval in log for my convenience
+            #  add eval in log for convenience
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(test_stats) + "\n")
             LOGGER.info('Epoch: [{}] '.format(epoch) + json.dumps(test_stats))
@@ -857,7 +769,7 @@ def main(args):
                                       args.subject_category_id, device, args)
 
             if args.output_dir and utils.is_main_process():
-                #  add eval in log for my convenience
+                #  add eval in log for convenience
                 with (output_dir / "log.txt").open("a") as f:
                     f.write('Test result:' + json.dumps(test_stats) + "\n")
                 LOGGER.info('Epoch Test: [{}] '.format(epoch) + json.dumps(test_stats))
@@ -872,18 +784,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    # if(args.wandb_enable):
-    #     run_name="run name"
-    #     run = wandb.init(project="ZSAR_LCA", config=args, name=run_name)
-    #     #get config params
-    #     trained_weights = wandb.config['trained_weights']
-    #     seed = wandb.config['random_seed']
-    #     network = wandb.config['network']
-    #     save_path = wandb.config['save_path']
-    #     dataset_name = wandb.config['dataset']
-    #     semantic = wandb.config['semantic']
-    #     lr = wandb.config['lr']
-    #     n_epochs = wandb.config['n_epochs']
-    #     batch_size = wandb.config['batch_size']
-
+    
     main(args)
