@@ -69,22 +69,6 @@ class HOICLIP(nn.Module):
             self.visual_projection = nn.Linear(512, 263)
             self.visual_projection.weight.data = hoi_clip_label / hoi_clip_label.norm(dim=-1, keepdim=True)
 
-        # if args.with_obj_clip_label:
-        #     self.obj_class_fc = nn.Sequential(
-        #         nn.Linear(hidden_dim, args.clip_embed_dim),
-        #         nn.LayerNorm(args.clip_embed_dim),
-        #     )
-        #     if args.fix_clip_label:
-        #         self.obj_visual_projection = nn.Linear(args.clip_embed_dim, num_obj_classes + 1, bias=False)
-        #         self.obj_visual_projection.weight.data = obj_clip_label / obj_clip_label.norm(dim=-1, keepdim=True)
-        #         for i in self.obj_visual_projection.parameters():
-        #             i.require_grads = False
-        #     else:
-        #         self.obj_visual_projection = nn.Linear(args.clip_embed_dim, num_obj_classes + 1)
-        #         self.obj_visual_projection.weight.data = obj_clip_label / obj_clip_label.norm(dim=-1, keepdim=True)
-        # else:
-        #     self.obj_class_embed = nn.Linear(hidden_dim, num_obj_classes + 1)
-
         if args.with_obj_clip_label:
             self.obj_class_fc = nn.Sequential(
                 nn.Linear(hidden_dim, 512),
@@ -114,31 +98,23 @@ class HOICLIP(nn.Module):
             hoi_text_embedding = clip_model.encode_text(hoi_text_inputs.to(device))
             obj_text_embedding = clip_model.encode_text(obj_text_inputs.to(device))
             v_linear_proj_weight = clip_model.visual.proj.detach()
-        # del clip_model
         return hoi_text_embedding.float(), obj_text_embedding.float(), v_linear_proj_weight.float()
 
  
 
     def forward(self, samples: NestedTensor, clip_input=None, targets=None):
         if not isinstance(samples, NestedTensor):
-            # change SS - flow of control doesn't reach here, so samples are already of NestedTensor type
+            # flow of control doesn't reach here, so samples are already of NestedTensor type
             samples = nested_tensor_from_tensor_list(samples)
 
         features, pos = self.backbone(samples)
         src, mask = features[-1].decompose()
         assert mask is not None
-        # h_hs, o_hs, inter_hs, clip_cls_feature, clip_hoi_score, clip_visual = self.transformer(self.input_proj(src), mask,
-        #                                         self.query_embed_h.weight,
-        #                                         self.query_embed_o.weight,
-        #                                         self.pos_guided_embedd.weight,
-        #                                         pos[-1], self.clip_model, self.clip_visual_proj, clip_input)
         h_hs, o_hs, inter_hs, clip_cls_feature, clip_hoi_score, clip_visual = self.transformer(self.input_proj(src), mask,
                                                 self.query_embed_h.weight,
                                                 self.query_embed_o.weight,
                                                 self.pos_guided_embedd.weight,
                                                 pos[-1], self.clip_model, self.clip_visual_proj, clip_input, targets)
-
-    
 
         outputs_sub_coord = self.hum_bbox_embed(h_hs).sigmoid()
         outputs_obj_coord = self.obj_bbox_embed(o_hs).sigmoid()
@@ -151,9 +127,7 @@ class HOICLIP(nn.Module):
 
         if self.args.with_clip_label:
             logit_scale = self.logit_scale.exp()
-            # inter_hs = self.hoi_class_fc(inter_hs)
             outputs_inter_hs = inter_hs.clone()
-            # print(f"outputs_inter_hs : {outputs_inter_hs.shape}")
             verb_hs = self.inter2verb(inter_hs)                                       # O_verb
             inter_hs = inter_hs / inter_hs.norm(dim=-1, keepdim=True)                 # use this
             verb_hs = verb_hs / verb_hs.norm(dim=-1, keepdim=True)
@@ -166,7 +140,6 @@ class HOICLIP(nn.Module):
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1], 'clip_visual': clip_visual,
                'clip_cls_feature': clip_cls_feature, 'hoi_feature': inter_hs[-1], 'clip_logits': clip_hoi_score, 'semantic_memory': outputs_inter_hs[-1]}
         
-
         return out
 
 
@@ -190,7 +163,6 @@ class PostProcessHOI(nn.Module):
     def __init__(self, num_queries, subject_category_id, correct_mat, args):
         super().__init__()
 
-        # extra part (absent in hoiclip.py)
         self.max_hois = 100
         self.num_queries = num_queries
         self.subject_category_id = subject_category_id
@@ -242,7 +214,6 @@ class PostProcessHOI(nn.Module):
             l = torch.cat((sl, ol))
             b = torch.cat((sb, ob))
 
-            # extra part (absent in hoiclip.py)
             bboxes = [{'bbox': bbox, 'category_id': label} for bbox, label in
                       zip(b.to('cpu').numpy(), l.to('cpu').numpy())]
 
@@ -267,11 +238,6 @@ class PostProcessHOI(nn.Module):
                 current_result = self.triplet_nms_filter(current_result)
 
             results.append(current_result)
-            # results.append({'labels': l.to('cpu'), 'boxes': b.to('cpu')})
-
-
-            # results[-1].update({'hoi_scores': hs.to('cpu'), 'obj_scores': os.to('cpu'), 'clip_visual': clip_visual[index].to('cpu'),
-            #                     'sub_ids': ids[:ids.shape[0] // 2], 'obj_ids': ids[ids.shape[0] // 2:], 'clip_logits': clip_logits[index].to('cpu')})
 
         return results
     
@@ -352,8 +318,6 @@ class PostProcessHOI(nn.Module):
 def get_args_parser():
     parser = argparse.ArgumentParser('Setup Funnel-HOI', add_help=False)
     parser.add_argument('--batch_size', default=8, type=int)
-    # parser.add_argument('--eval_each', default=4, type=int)
-    # parser.add_argument('--eval_each_lr_drop', default=2, type=int)
 
     # * Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
@@ -392,7 +356,6 @@ def get_args_parser():
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--dataset_file', default='coco')
 
-
     # PNMS
     parser.add_argument('--use_nms_filter', action='store_true', help='Use pair nms filter, default not use')
     parser.add_argument('--thres_nms', default=0.7, type=float)
@@ -408,55 +371,20 @@ def get_args_parser():
                         help='clip pretrained model path')
     parser.add_argument('--clip_embed_dim', default=512, type=int)
 
-    
-    # # old parameter
-    # parser.add_argument('--fix_backbone_mode', nargs='+', default=[], help='fix (part of) backbone')
-
-    # # others
-    # parser.add_argument('--use_ddp', default=1, type=int)
-    # parser.add_argument('--with_random_shuffle', default=2, type=int, help='Time of random shuffle of annotation')
-    # parser.add_argument('--gradient_accumulation_steps', default=1, type=int)
-    # parser.add_argument('--opt_sched', default='multiStep', type=str, help='type of scheduler')
-    # parser.add_argument('--no_clip_cls_init', action='store_true',
-    #                     help='not init classifier weight with clip text encoder')
-    # parser.add_argument('--enable_amp', action='store_true', help='')
-    # parser.add_argument('--opt_level', default='O2', help='half precision optimization level', choices=('O1', 'O2'))
-    # parser.add_argument('--fix_clip_label', action='store_true', help='')
-    # parser.add_argument('--with_rec_loss', action='store_true', help='')
-    # parser.add_argument('--rec_loss_coef', default=2, type=float)
-    # parser.add_argument('--no_training', action='store_true', help='')
     parser.add_argument('--dataset_root', default='GEN', help='')
-    parser.add_argument('--model_name', default='HOICLIP', help='')
-    # parser.add_argument('--eval_location', action='store_true', help='')
-    # # DAB
-    # parser.add_argument('--enable_cp', action='store_true',
-    #                     help="use checkpoint to save memory")
-    # parser.add_argument('--no_fix_clip_linear', action='store_true',
-    #                     help="")
-    # parser.add_argument('--analysis', action='store_true')
-
-    # # tmp args
-    # parser.add_argument('--alternative', default=1, type=int)
-    # parser.add_argument('--eval_each_ap', action='store_true')
-    # parser.add_argument('--topk_hoi', default=10, type=int)
+    parser.add_argument('--model_name', default='Funnel-HOI', help='')
     parser.add_argument('--inter_dec_layers', default=3, type=int)
 
     # verb setting
     parser.add_argument('--verb_pth', default='', help='location for predefined verb feature', type=str)
     parser.add_argument('--verb_weight', default=0.5, type=float)
 
-
     # validation split
     parser.add_argument('--validation_split', default=-1., type=int)
     parser.add_argument('--lr_drop_gamma', default=0.1, type=float)
-
-    # zero shot enhancement
-    # parser.add_argument('--training_free_enhancement_path', default='', type=str)
     parser.add_argument('--zero_shot_type', default='default',
                         help='default, rare_first, non_rare_first, unseen_object, unseen_verb')
     
-    # change SS: funnel-hoi
-    # parser.add_argument('--save_points', default=0, type=int)
     parser.add_argument('--num_cross_attention_layers', default=3, action='store_true')
     parser.add_argument('--wandb_enable', default=False, action='store_true')
     parser.add_argument('--concat_v_fo', action='store_true')
@@ -476,7 +404,6 @@ def get_args_parser():
     parser.add_argument('--videoDemo', action='store_true')
     return parser
 
-# change SS
 def normalize_to_range(x):
     x -= x.min(1, keepdim=True)[0] # bring the lower range to 0
     x /= x.max(1, keepdim=True)[0] # bring the upper range to 1
@@ -484,14 +411,10 @@ def normalize_to_range(x):
     return x
 
 def obj_verb_relatedness(args):
-    # rel_cnet = torch.load('../conceptNet/similarityMatrix_rootVerb.pt') #[80, 117]
-    # rel_cnet = rel_cnet[:80, :]
     rel_cnet = torch.load(args.conceptnet_path) #[80, 117]
     print(f"size of cnet matrix: {rel_cnet.shape}")
     assert torch.min(rel_cnet) >= -1 and torch.max(rel_cnet) <= 1 # found to be True
 
-    # get object semantics based on just the object name as prompt
-    # expected output shape: total_num_objects x clip_dim 
     clip_model, _ = clip.load(args.clip_model)
     verb_file = vcoco_verb_text_label
     obj_file = vcoco_obj_text_label_our
@@ -499,43 +422,29 @@ def obj_verb_relatedness(args):
     total_num_objects=len(obj_file)
     objects=[obj_file[i][1].split() for i in range(total_num_objects)]
     objects=[' '.join(objects[i][4:]) for i in range(len(objects))]
-    # print(objects)
     text_inputs_o=torch.cat([clip.tokenize(o) for o in objects]).to("cuda")
     clip_text_embeddings_o=clip_model.encode_text(text_inputs_o).to("cuda")  # need to add line to check if clip model on cuda or not
     clip_text_embeddings_o=clip_text_embeddings_o.float()
     clip_text_embeddings_o=clip_text_embeddings_o[:total_num_objects-1,:]
-    # print(f"this size should be 80 {clip_text_embeddings_o.shape}")
-    # return clip_text_embeddings_o.detach()
 
-
-    # get verb semantics based on just the verb-ing name as prompt
-    # expected output shape: total_num_verbs x clip_dim 
     total_num_verbs=len(verb_file)
     verbs=[verb_file[i].split() for i in range(total_num_verbs)]
     verbs=[' '.join(verbs[i][5:]) for i in range(len(verbs))]
-    # print(verbs)
     text_inputs_v=torch.cat([clip.tokenize(o) for o in verbs]).to("cuda")
     clip_text_embeddings_v=clip_model.encode_text(text_inputs_v).to("cuda")  # need to add line to check if clip model on cuda or not
     clip_text_embeddings_v=clip_text_embeddings_v.float()
-    # print(clip_text_embeddings_v)
-    # print(f"this size should be 117x512 {clip_text_embeddings_v.shape}")
-    # exit(0)
-    # return clip_text_embeddings_v.detach()
+
     rel_clip = torch.matmul(clip_text_embeddings_o, clip_text_embeddings_v.T)
-    # assert torch.min(rel_clip) >= -1 and torch.max(rel_clip) <= 1 # found to be False
     rel_clip = normalize_to_range(rel_clip)
     assert torch.min(rel_clip) >= -1 and torch.max(rel_clip) <= 1 # found to be True
 
     rel_cnet=rel_cnet.to("cuda")
-    # print(rel_cnet.device)
-    # print(rel_clip.device)
+
     rho_obj_action = args.rel_alpha * rel_clip + (1 - args.rel_alpha) * rel_cnet
     assert torch.min(rho_obj_action) >= -1 and torch.max(rho_obj_action) <= 1 # found to be True
         
     return rho_obj_action
-
-
-
+    
 
 def main(args):
     print("git:\n  {}\n".format(utils.get_sha()))

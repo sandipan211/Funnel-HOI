@@ -6,9 +6,7 @@ from typing import Iterable
 import numpy as np
 import copy
 import itertools
-
 import torch
-
 import util.misc as utils
 from datasets.datasets_gen.hico_eval_triplet import HICOEvaluator as HICOEvaluator_gen
 from datasets.datasets_gen.vcoco_eval import VCOCOEvaluator as VCOCOEvaluator_gen
@@ -18,15 +16,7 @@ from tqdm import tqdm
 import datetime
 import time
 import gc
-
-# change SS
 from pathlib import Path
-
-# visualization
-# from gradcam import gradcam_output
-# from pytorch_grad_cam import GradCAM
-# from myVisualization import gradCAMAveragePooling,gradCAMfo,gradCAMSum
-# from models.models_hoiclip.hoiclip import hwArray,adaptiveAverageActivations,sumActivations,foActivations,adaptiveAverageGradients,sumGradients,foGradients
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -48,8 +38,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     if enable_amp:
         print('\nEnable half precision training\n')
 
-    # scaler = GradScaler()
-    # debug
     debug_count = 0
     step = 0
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
@@ -57,7 +45,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             samples = samples.to(device)
             targets = [{k: v.to(device) for k, v in t.items() if k != 'filename' and k != 'raw_img'} for t in targets]
             clip_img = torch.stack([v['clip_inputs'] for v in targets])
-            # with autocast():
             obj_feature, hoi_feature, verb_feature = model(samples, clip_input=clip_img, targets=targets)
 
             metric_logger.update(loss=0)
@@ -78,16 +65,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         for t, f in zip(targets, file_names):
             t.update(f)
         clip_img = torch.stack([v['clip_inputs'] for v in targets])
-        # print(clip_img[0])
-        # print(targets[0]["filename"])
-        # exit(0)
-        # print("from engine.py")
-        # print(targets[0]["clip_inputs"].shape)
-        # print(f"clip_img shape: {clip_img.shape}")
         outputs = model(samples, clip_input=clip_img, targets=targets)
 
-        # change SS
-        # exit()
         loss_dict = criterion(outputs, targets)
 
         weight_dict = criterion.weight_dict
@@ -102,8 +81,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
 
         loss_value = losses_reduced_scaled.detach().item()
-        # print(loss_value)
-        # sys.exit()
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
@@ -114,17 +91,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         losses = losses / gradient_accumulation_steps
         if enable_amp:
             raise NotImplementedError
-            # with amp.scale_loss(losses, optimizer, delay_unscale=delay_unscale) as scaled_loss:
-            #     scaled_loss.backward()
         else:
             losses.backward()
-        # print(f"{adaptiveAverageActivations[0].shape} {adaptiveAverageGradients[0][0].shape}")
-        # print(f"{sumActivations[0].shape} {sumGradients[0][0].shape}")
-        # print(f"{foActivations[0].shape} {foGradients[0][0].shape}")
-        # gradCAMAveragePooling(adaptiveAverageActivations[0],adaptiveAverageGradients[0][0],hwArray[0][0],hwArray[0][1])
-        # gradCAMSum(sumActivations[0],sumGradients[0][0],hwArray[0][0],hwArray[0][1])
-        # gradCAMfo(foActivations[0],foGradients[0][0],hwArray[0][0],hwArray[0][1])
-        # exit(0)
 
         if (step + 1) % gradient_accumulation_steps == 0:
             if max_norm > 0:
@@ -159,9 +127,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         del losses, outputs, loss_dict, loss_dict_reduced, loss_dict_reduced_unscaled, loss_dict_reduced_scaled
         gc.collect()
         torch.cuda.empty_cache()
-        # # outputs=None
-    # gc.collect()
-    # torch.cuda.empty_cache()
+       
     
 
     # trick for generate verb
@@ -208,17 +174,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader,
     preds = []
     gts = []
     counter = 0
-    
-    # print(len(data_loader))
-    # for tsne
-    # selectedInteractionFeatures=[]
-    # selectedLabels=[]
-    # desiredInteractions={(111, 4),(10, 15),(111, 3),(111, 18),(111, 6),(12, 59),(96, 50),(111, 49),(15, 48),(0, 30)}
 
-    # to calculate the accuracy of calculation of toplo,toplv
-    # total_matched_o=0
-    # total_matched_v=0
-    # total_interactive_images=0
     for samples, targets in metric_logger.log_every(data_loader, 10, header):
         samples = samples.to(device)
         
@@ -226,35 +182,9 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader,
 
         outputs = model(samples, is_training=False, clip_input=clip_img, targets=targets)
         
-        # to calculate the accuracy of calculation of toplo,toplv
-        # for target in targets:
-        #     total_matched_o+=target["numMatches_o"]
-        #     total_matched_v+=target["numMatches_v"]
-        #     total_interactive_images+=target["numinteractive_images"]
         if(not args.viz_only): # change SS: for TETCI
             orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
             results = postprocessors['hoi'](outputs, orig_target_sizes)
-
-            # for tsne
-            # interactionFeature = outputs['hoi_feature']
-            # interactionFeature = torch.mean(interactionFeature,dim=1)
-            # for i in range(len(targets)):
-            #     target = targets[i]
-            #     labels = target['labels']
-            #     hois = target['hois']
-            #     numMatches = 0
-            #     prevMatch = None 
-            #     for hoi in hois:
-            #         currInteraction = (int(hoi[2]),int(labels[hoi[1]]))
-            #         if(currInteraction in desiredInteractions):
-            #             if(currInteraction != prevMatch):
-            #                 numMatches+=1
-            #                 prevMatch=currInteraction
-            #     if(numMatches == 1):
-            #         selectedInteractionFeatures.append(interactionFeature[i].unsqueeze(0))
-            #         selectedLabels.append(prevMatch)
-            
-            
             preds.extend(list(itertools.chain.from_iterable(utils.all_gather(results))))
             # For avoiding a runtime error, the copy is used
             gts.extend(list(itertools.chain.from_iterable(utils.all_gather(copy.deepcopy(targets)))))
@@ -267,7 +197,6 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader,
         samples=None
         targets=None
         clip_img=None
-        # outputs=None
     gc.collect()
     torch.cuda.empty_cache()
     
@@ -275,19 +204,8 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader,
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     
-    if(args.viz_only): # change SS: for TETCI
+    if(args.viz_only): 
         exit(0)
-
-    # for tsne
-    # interactionFeatures=torch.cat(selectedInteractionFeatures,dim=0)
-    # print(f"interactionFeatures shape:{interactionFeatures.shape}")
-    # torch.save(interactionFeatures,'../tSNEPlots/features_NF_UC_fo_fv_clip100percent_myloss.pt')
-    # torch.save(selectedLabels,'../tSNEPlots/labels_NF_UC_fo_fv_clip100percent_myloss.pt')
-    # exit(0)
-    
-    # to calculate the accuracy of calculation of toplo,toplv
-    # print(f"topk objects accuracy: {(total_matched_o*100)/total_interactive_images},topk verbs accuracy: {(total_matched_v*100)/total_interactive_images}")
-    # exit(0)
     
     img_ids = [img_gts['id'] for img_gts in gts]
     _, indices = np.unique(img_ids, return_index=True)
@@ -300,7 +218,6 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader,
     args.training_free_enhancement_path is the path to store performance for different hyper-parameter
     """
     root = os.path.join(args.output_dir, args.training_free_enhancement_path)
-    # change SS: make the directory here also if not exists
     Path(root).mkdir(parents=True, exist_ok=True)
     if args.training_free_enhancement_path:
 
@@ -326,15 +243,10 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader,
         spatial_feature /= spatial_feature.norm(dim=-1, keepdim=True)
         spatial_cls = spatial_feature[:, 0, :]  # M, c
         
-        #mine
-        # print(spatial_cls.device)
-        # print(spatial_cls.shape)
-        # print(text_hoi_feature.device)
-        # print(text_hoi_feature.shape)
+
         spatial_cls=spatial_cls.to(text_hoi_feature.device)
-        # here we add prompt learning on text_hoi_feature
+        # here we can add prompt learning on text_hoi_feature
         cls_scores = spatial_cls @ text_hoi_feature.T
-        # mine
         cls_scores = cls_scores.detach().cpu()
         with open(os.path.join(root, 'log.txt'), 'a') as f:
             log = f'\n=========Baseline Performance============\n{stats}\n============================\n'
